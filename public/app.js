@@ -14,6 +14,7 @@ $("#auth-form").onsubmit=async e=>{e.preventDefault();try{const b=await api("/ap
 async function showGame(id){try{const g=(await api("/api/games/"+encodeURIComponent(id))).game;go("detail");$("#game-detail").innerHTML=`<div class="detail-hero"><small>GAME DETAILS</small><h1>${esc(g.name)}</h1></div><p class="muted">${esc(g.description||"Ready when you are.")}</p><div class="actions"><button class="primary" id="play">▶ Play</button>${g.offline?'<button id="download">↓ Download</button>':""}<button id="favorite">${g.favorite?"♥ Saved":"♡ Favourite"}</button></div><p class="muted">${g.offline?"Offline download available":"Online play"}</p>`;$("#play").onclick=()=>play(g);$("#favorite").onclick=async()=>{if(!S.user)return auth();await api("/api/favorites/"+encodeURIComponent(g.id),{method:"POST",body:"{}"});showGame(g.id)};if($("#download"))$("#download").onclick=()=>download(g)}catch(e){alert(e.message)}}
 
 // HUDGAMES_SEPARATE_GAME_ORIGIN
+
 async function play(g) {
     if (S.user) {
         api("/api/activity", {
@@ -22,33 +23,12 @@ async function play(g) {
         }).catch(() => {});
     }
 
-    if (location.protocol !== "http:") {
-        alert("Separate-origin game launching currently requires HTTP localhost.");
-        return;
-    }
+    const gameUrl = new URL(
+        "/api/games/" + encodeURIComponent(g.id) + "/play",
+        location.origin
+    );
 
-    const hostname = location.hostname.toLowerCase();
-    let gameHost;
-
-    if (hostname === "localhost") {
-        gameHost = "127.0.0.1";
-    } else if (hostname === "127.0.0.1") {
-        gameHost = "localhost";
-    } else {
-        alert(
-            "Open HUDGAMES using http://localhost:" +
-            location.port +
-            " to enable isolated game tabs."
-        );
-        return;
-    }
-
-    const port = location.port ? ":" + location.port : "";
-    const gameUrl =
-        "http://" + gameHost + port +
-        "/api/games/" + encodeURIComponent(g.id) + "/play";
-
-    window.open(gameUrl, "_blank", "noopener,noreferrer");
+    window.open(gameUrl.href, "_blank", "noopener,noreferrer");
 }
 
 const dbOpen=()=>new Promise((ok,no)=>{const r=indexedDB.open("hudgames-offline",1);r.onupgradeneeded=()=>r.result.createObjectStore("games",{keyPath:"id"});r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)});
