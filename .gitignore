@@ -1,0 +1,24 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+
+# Local database
+data/hudgames.sqlite
+data/hudgames.sqlite-*
+data/hudgames.sqlite*
+
+# Uploaded game packages
+storage/packages/*
+
+# Backups
+*.bak
+*/*.bak
+
+# Temporary files
+*.log
+.DS_Store
+Thumbs.db
