@@ -105,8 +105,12 @@ app.get("/play/:id", async (req, res, next) => {
             "application/octet-stream";
 
         res.setHeader("Content-Type", contentType);
-        res.setHeader("Cache-Control", "no-store");
-        res.setHeader("X-Content-Type-Options", "nosniff");
+res.setHeader("Cache-Control", "no-store");
+res.setHeader("X-Content-Type-Options", "nosniff");
+res.setHeader(
+    "Content-Security-Policy",
+    "upgrade-insecure-requests"
+);
 
         if (!upstream.body) {
             return res.status(502).send(
