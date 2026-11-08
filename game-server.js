@@ -29,31 +29,39 @@ const byId = new Map(
 
 function cleanContent(content) {
     return content
-        // Remove malformed comment lines.
+        // Remove malformed comment-ending lines.
         .split(/\r?\n/)
         .filter(line => !line.trimEnd().endsWith("--!>"))
         .join("\n")
 
-        // Upgrade insecure resource URLs.
-        .replace(/\bhttp:\/\/(?=[^"'`\s<>]*\.(?:css|js|ico|png|jpe?g|gif|svg|woff2?|ttf|webp)(?:[?#"'`\s<>]|$))/gi, "https://")
-
-        // Upgrade HTTP URLs in HTML attributes.
+        // Fix the CDN responsible for the reported mixed-content errors.
         .replace(
-            /(\b(?:href|src|poster|action)\s*=\s*)(["'])http:\/\//gi,
-            "$1$2https://"
+            /http:\/\/cdn\.statically\.io\//gi,
+            "https://cdn.statically.io/"
         )
 
-        // Upgrade HTTP URLs in CSS url().
+        // Fix HTTP URLs in HTML, JS and CSS.
         .replace(
-            /(url\(\s*["']?)http:\/\//gi,
-            "$1https://"
-        )
+            /http:\/\/([^"'`\s<>]+)/gi,
+            (match, url) => {
+                // Avoid changing localhost URLs.
+                if (/^(localhost|127\.0\.0\.1)(:|\/)/i.test(url)) {
+                    return match;
+                }
 
-        // Upgrade HTTP CSS imports.
-        .replace(
-            /(@import\s+["'])http:\/\//gi,
-            "$1https://"
+                return "https://" + url;
+            }
         );
+}
+
+function shouldClean(contentType, url) {
+    return (
+        contentType.includes("text/html") ||
+        contentType.includes("text/css") ||
+        contentType.includes("javascript") ||
+        contentType.includes("ecmascript") ||
+        /\.(?:html?|css|js)(?:[?#]|$)/i.test(url)
+    );
 }
 
 app.get("/health", (req, res) => {
@@ -106,10 +114,9 @@ app.get("/play/:id", async (req, res, next) => {
             );
         }
 
-        if (
-            contentType.includes("text/html") ||
-            contentType.includes("text/css")
-        ) {
+        if (shouldClean(contentType, url)) {
+            console.log("Cleaning game HTML/JS/CSS:", id);
+
             const content = await upstream.text();
             return res.send(cleanContent(content));
         }
