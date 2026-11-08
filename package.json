@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "migrate:turso": "node migrate-to-turso.js"
+    "migrate:turso": "node migrate-to-turso.js",
+    "start:games": "node game-server.js"
   },
   "engines": {
     "node": ">=22.5.0"

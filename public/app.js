@@ -15,6 +15,8 @@ async function showGame(id){try{const g=(await api("/api/games/"+encodeURICompon
 
 // HUDGAMES_SEPARATE_GAME_ORIGIN
 
+const GAME_ORIGIN = "https://hudgames-play.onrender.com";
+
 async function play(g) {
     if (S.user) {
         api("/api/activity", {
@@ -23,12 +25,33 @@ async function play(g) {
         }).catch(() => {});
     }
 
-    const gameUrl = new URL(
-        "/api/games/" + encodeURIComponent(g.id) + "/play",
-        location.origin
-    );
+    const tab = window.open("about:blank", "_blank");
 
-    window.open(gameUrl.href, "_blank", "noopener,noreferrer");
+    if (!tab) {
+        alert("Allow pop-ups for HUDGAMES to launch games.");
+        return;
+    }
+
+    tab.opener = null;
+
+    try {
+        const blob = await offlineGet(String(g.id));
+
+        if (blob) {
+            tab.location.href = URL.createObjectURL(blob);
+            return;
+        }
+
+        const url = new URL(
+            "/play/" + encodeURIComponent(g.id),
+            GAME_ORIGIN
+        );
+
+        tab.location.href = url.href;
+    } catch (error) {
+        tab.close();
+        alert("Could not launch game: " + error.message);
+    }
 }
 
 const dbOpen=()=>new Promise((ok,no)=>{const r=indexedDB.open("hudgames-offline",1);r.onupgradeneeded=()=>r.result.createObjectStore("games",{keyPath:"id"});r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)});
@@ -38,7 +61,14 @@ async function loadLibrary(){if(!S.user){$("#library-games").innerHTML='<div cla
 async function offlineList(){try{const d=await dbOpen();return await new Promise((ok,no)=>{const r=d.transaction("games").objectStore("games").getAll();r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}catch{return[]}}
 async function loadFavorites(){if(!S.user){$("#favorite-games").innerHTML='<div class="empty">Sign in to save favourites.</div>';return}const g=(await api("/api/favorites")).games;$("#favorite-games").innerHTML=g.map(card).join("")||'<div class="empty">No favourites yet.</div>';bindCards($("#favorite-games"))}
 async function loadFriends(){if(!S.user){$("#friend-list").innerHTML='<div class="empty">Sign in to add friends.</div>';return}try{const [f,r]=await Promise.all([api("/api/friends"),api("/api/requests")]);S.friends=f.friends;$("#requests").innerHTML=r.requests.map(x=>`<div class="request"><div class="friend-info">${esc(x.display_name)} · ${esc(x.friend_code)}</div><button class="small" data-accept="${esc(x.id)}">Accept</button><button class="small" data-decline="${esc(x.id)}">Decline</button></div>`).join("")||'<p class="muted">No pending requests.</p>';$("#friend-list").innerHTML=S.friends.map(x=>`<div class="friend"><i class="dot ${x.online?"on":""}"></i><div class="friend-info"><b>${esc(x.displayName)}</b><div class="status ${x.playingName&&x.online?"playing":""}">${x.online?(x.playingName?"Playing "+esc(x.playingName):"Online"):"Offline"}</div></div><button class="small" data-message="${esc(x.id)}">Message</button></div>`).join("")||'<div class="empty">No friends yet.</div>';$("#requests").querySelectorAll("[data-accept]").forEach(b=>b.onclick=()=>requestAction(b.dataset.accept,"accept"));$("#requests").querySelectorAll("[data-decline]").forEach(b=>b.onclick=()=>requestAction(b.dataset.decline,"decline"));$("#friend-list").querySelectorAll("[data-message]").forEach(b=>b.onclick=()=>{S.active=b.dataset.message;go("messages");loadConversations()})}catch(e){$("#friend-list").textContent=e.message}}
-async function requestAction(id,a){await api(`/api/requests/${id}/${a}`,{method:"POST",body:"{}"});loadFriends()}
+async function requestAction(id,a){
+    const action = a === "decline" ? "reject" : a;
+    await api(`/api/requests/${encodeURIComponent(id)}/${action}`, {
+        method: "POST",
+        body: "{}"
+    });
+    await loadFriends();
+}
 $("#add-friend").onclick=async()=>{try{await api("/api/friends/request",{method:"POST",body:JSON.stringify({friendCode:$("#friend-code").value})});$("#friend-result").textContent="Friend request sent.";$("#friend-code").value=""}catch(e){$("#friend-result").textContent=e.message}};
 async function loadConversations(){if(!S.user){$("#conversations").innerHTML='<p class="empty">Sign in to chat.</p>';return}const f=(await api("/api/friends")).friends;S.friends=f;$("#conversations").innerHTML=f.map(x=>`<button class="conversation ${S.active===x.id?"active":""}" data-convo="${esc(x.id)}">${esc(x.displayName)} ${x.online?"●":""}</button>`).join("")||'<p class="muted">Add friends to chat.</p>';$("#conversations").querySelectorAll("[data-convo]").forEach(b=>b.onclick=()=>{S.active=b.dataset.convo;loadChat();loadConversations()});if(S.active)loadChat()}
 async function loadChat(){const f=S.friends.find(x=>x.id===S.active);if(!f)return;try{const m=(await api("/api/messages/"+encodeURIComponent(f.id))).messages;$("#chat").innerHTML=`<div class="chat-head">${esc(f.displayName)}</div><div id="chat-log" class="chat-log">${m.map(x=>`<div class="bubble ${x.from_id===S.user.id?"mine":""}">${esc(x.body)}<br/><small>${new Date(x.created).toLocaleString()}</small></div>`).join("")}</div><form id="compose" class="compose"><input id="message-text" maxlength="2000" placeholder="Write a message…"><button class="primary">Send</button></form>`;$("#compose").onsubmit=async e=>{e.preventDefault();const i=$("#message-text"),body=i.value.trim();if(!body)return;i.value="";await api("/api/messages/"+encodeURIComponent(f.id),{method:"POST",body:JSON.stringify({body})});loadChat()};$("#chat-log").scrollTop=$("#chat-log").scrollHeight}catch(e){$("#chat").textContent=e.message}}

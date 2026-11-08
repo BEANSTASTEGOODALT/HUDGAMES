@@ -1,0 +1,19 @@
+{
+  "name": "hudgames",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "migrate:turso": "node migrate-to-turso.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "multer": "^2.0.2",
+    "@libsql/client": "^0.15.15"
+  }
+}
