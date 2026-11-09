@@ -5,7 +5,91 @@ function go(v){document.querySelectorAll(".view").forEach(x=>x.classList.add("hi
 function card(g){return `<article class="card" data-id="${esc(g.id)}"><div class="cover">${g.cover?`<img src="${esc(g.cover)}">`:esc((g.name||"?")[0].toUpperCase())}</div><div class="card-body"><div class="card-title">${esc(g.name)}</div><div class="card-meta">${g.offline?'<span class="offline">● Offline available</span>':"Game"}</div></div></article>`}
 function bindCards(root){root.querySelectorAll("[data-id]").forEach(x=>x.onclick=()=>showGame(x.dataset.id))}
 function render(){for(const [id,list] of [["home-games",S.games.slice(0,8)],["browse-games",S.games]]){$("#"+id).innerHTML=list.map(card).join("");bindCards($("#"+id))}$("#count").textContent=`${S.games.length.toLocaleString()} games`}
-async function init(){try{S.user=(await api("/api/me")).user;account();S.games=(await api("/api/games")).games;render();}catch(e){console.error(e)}connection()}
+
+// HUDGAMES_INSTANT_CATALOG_CACHE_V1
+// Show the last catalogue immediately, then refresh it from the server.
+async function loadGamesCached() {
+    const cacheName = "hudgames-catalog-v1";
+    const cacheKey = new URL(
+        "/__hudgames_cache/catalog/" +
+        encodeURIComponent(S.user?.id || "guest"),
+        location.origin
+    ).href;
+
+    let cache = null;
+    let showedCachedGames = false;
+
+    if ("caches" in window) {
+        try {
+            cache = await caches.open(cacheName);
+            const saved = await cache.match(cacheKey);
+
+            if (saved) {
+                const cachedData = await saved.json();
+
+                if (Array.isArray(cachedData.games)) {
+                    S.games = cachedData.games;
+                    render();
+                    showedCachedGames = true;
+                    console.log(
+                        "HUDGAMES: displayed cached catalogue (" +
+                        S.games.length + " games)"
+                    );
+                }
+            }
+        } catch (error) {
+            console.warn("HUDGAMES: catalogue cache unavailable:", error);
+        }
+    }
+
+    try {
+        const response = await fetch("/api/games", {
+            method: "GET",
+            credentials: "same-origin",
+            cache: "no-store",
+            headers: { "Accept": "application/json" }
+        });
+
+        if (!response.ok) {
+            throw new Error("Games request failed (" + response.status + ")");
+        }
+
+        const data = await response.json();
+
+        if (!data || !Array.isArray(data.games)) {
+            throw new Error("The games API returned an invalid catalogue.");
+        }
+
+        S.games = data.games;
+        render();
+
+        if (cache) {
+            try {
+                await cache.put(
+                    cacheKey,
+                    new Response(JSON.stringify(data), {
+                        headers: { "Content-Type": "application/json" }
+                    })
+                );
+            } catch (error) {
+                console.warn("HUDGAMES: could not save catalogue cache:", error);
+            }
+        }
+
+        console.log(
+            "HUDGAMES: refreshed catalogue (" + S.games.length + " games)"
+        );
+    } catch (error) {
+        if (!showedCachedGames) throw error;
+
+        console.warn(
+            "HUDGAMES: server refresh failed; keeping saved catalogue:",
+            error
+        );
+    }
+}
+
+async function init(){try{S.user=(await api("/api/me")).user;account();await loadGamesCached();}catch(e){console.error(e)}connection()}
 function account(){$("#account").textContent=S.user?S.user.displayName+" · Sign out":"Sign in";$("#auth-top").textContent=S.user?"Account":"Sign in"}
 function auth(mode="login"){S.mode=mode;$("#auth-title").textContent=mode==="login"?"Sign in":"Create account";$("#auth-submit").textContent=mode==="login"?"Sign in":"Create account";$("#display-label").classList.toggle("hidden",mode==="login");$("#switch-auth").textContent=mode==="login"?"Create an account":"I already have an account";$("#auth-error").textContent="";$("#auth-dialog").showModal()}
 $("#auth-top").onclick=()=>S.user?logout():auth();$("#account").onclick=()=>S.user?logout():auth();$("#close-auth").onclick=()=>$("#auth-dialog").close();$("#switch-auth").onclick=()=>auth(S.mode==="login"?"register":"login");

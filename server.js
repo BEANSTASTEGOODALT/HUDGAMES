@@ -316,6 +316,8 @@ app.get("/api/me", (req, res) => {
     res.json({ user: req.user ? safeUser(req.user) : null });
 });
 
+
+// HUDGAMES_FAST_GAMES_API_V1
 app.get("/api/games", async (req, res, next) => {
     try {
         const q = String(req.query.q || "").toLowerCase();
@@ -324,11 +326,39 @@ app.get("/api/games", async (req, res, next) => {
             String(g.name || g.title || "").toLowerCase().includes(q)
         );
 
-        res.json({
-            games: await Promise.all(
-                found.map(g => gameView(g, req.user?.id))
+        // Fetch metadata and this user's favourites in two queries total.
+        // The old implementation made up to two database queries per game.
+        const metadataRows = await all("SELECT * FROM game_meta");
+        const metadata = new Map(
+            metadataRows.map(row => [String(row.game_id), row])
+        );
+
+        const favouriteIds = req.user
+            ? new Set(
+                (await all(
+                    "SELECT game_id FROM favorites WHERE user_id=?",
+                    [req.user.id]
+                )).map(row => String(row.game_id))
             )
+            : new Set();
+
+        const result = found.map(g => {
+            const id = String(g.id);
+            const meta = metadata.get(id);
+
+            return {
+                id,
+                name: g.name || g.title || "Untitled",
+                title: g.title || g.name || "Untitled",
+                description: meta?.description || "",
+                cover: meta?.cover || "",
+                offline: !!meta?.offline,
+                favorite: favouriteIds.has(id)
+            };
         });
+
+        res.setHeader("Cache-Control", "private, no-cache");
+        res.json({ games: result });
     } catch (error) {
         next(error);
     }
