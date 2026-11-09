@@ -1,278 +1,233 @@
-
-import json
-import shutil
 from pathlib import Path
+from datetime import datetime
+import sys
 
 ROOT = Path(__file__).resolve().parent
-PUBLIC = ROOT / "public"
+APP_FILE = ROOT / "public" / "app.js"
+SERVER_FILE = ROOT / "server.js"
 
-APP = PUBLIC / "app.js"
-PACKAGE = ROOT / "package.json"
-SERVER = ROOT / "server.js"
-GAMES = ROOT / "data" / "games.json"
+APP_MARKER = "HUDGAMES_INSTANT_CATALOG_CACHE_V1"
+SERVER_MARKER = "HUDGAMES_FAST_GAMES_API_V1"
 
-GAME_ORIGIN = "https://hudgames-play.onrender.com"
+def read_file(path):
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing file: {path}")
+    return path.read_text(encoding="utf-8")
 
-GAME_SERVER = r'''import express from "express";
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+def backup(path, content):
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = path.with_name(path.name + ".bak-" + stamp)
+    target.write_text(content, encoding="utf-8", newline="")
+    print(f"Backup: {target.name}")
 
-const root = path.dirname(fileURLToPath(import.meta.url));
-const app = express();
-const port = Number(process.env.PORT || 3000);
+def patch_app(source):
+    if APP_MARKER in source:
+        print("app.js already has the instant catalogue cache.")
+        return source, False
 
-const gamesFile = path.join(root, "data", "games.json");
+    old_init_load = 'S.games=(await api("/api/games")).games;render();'
+    if source.count(old_init_load) != 1:
+        raise RuntimeError(
+            "Could not find the exact games-loading line in public/app.js. "
+            "Nothing was changed. Check that this is the app.js you supplied."
+        )
 
-if (!fs.existsSync(gamesFile)) {
-    throw new Error("data/games.json is missing.");
-}
+    helper = r'''
+// HUDGAMES_INSTANT_CATALOG_CACHE_V1
+// Show the last catalogue immediately, then refresh it from the server.
+async function loadGamesCached() {
+    const cacheName = "hudgames-catalog-v1";
+    const cacheKey = new URL(
+        "/__hudgames_cache/catalog/" +
+        encodeURIComponent(S.user?.id || "guest"),
+        location.origin
+    ).href;
 
-const games = JSON.parse(fs.readFileSync(gamesFile, "utf8"));
+    let cache = null;
+    let showedCachedGames = false;
 
-if (!Array.isArray(games)) {
-    throw new Error("games.json must contain an array.");
-}
+    if ("caches" in window) {
+        try {
+            cache = await caches.open(cacheName);
+            const saved = await cache.match(cacheKey);
 
-const byId = new Map(games.map(g => [String(g.id), g]));
+            if (saved) {
+                const cachedData = await saved.json();
 
-app.get("/health", (req, res) => {
-    res.json({ ok: true, games: games.length });
-});
+                if (Array.isArray(cachedData.games)) {
+                    S.games = cachedData.games;
+                    render();
+                    showedCachedGames = true;
+                    console.log(
+                        "HUDGAMES: displayed cached catalogue (" +
+                        S.games.length + " games)"
+                    );
+                }
+            }
+        } catch (error) {
+            console.warn("HUDGAMES: catalogue cache unavailable:", error);
+        }
+    }
 
-app.get("/play/:id", async (req, res, next) => {
     try {
-        const id = String(req.params.id);
-        const game = byId.get(id);
+        const response = await fetch("/api/games", {
+            method: "GET",
+            credentials: "same-origin",
+            cache: "no-store",
+            headers: { "Accept": "application/json" }
+        });
 
-        if (!game) {
-            return res.status(404).send("Game not found.");
+        if (!response.ok) {
+            throw new Error("Games request failed (" + response.status + ")");
         }
 
-        if (!process.env.GOOGLE_API_KEY) {
-            return res.status(503).send("Google Drive API key is not configured.");
+        const data = await response.json();
+
+        if (!data || !Array.isArray(data.games)) {
+            throw new Error("The games API returned an invalid catalogue.");
         }
 
-        const url =
-            "https://www.googleapis.com/drive/v3/files/" +
-            encodeURIComponent(id) +
-            "?alt=media&key=" +
-            encodeURIComponent(process.env.GOOGLE_API_KEY);
+        S.games = data.games;
+        render();
 
-        const upstream = await fetch(url);
-
-        if (!upstream.ok) {
-            const status = upstream.status === 404 ? 404 : 502;
-            return res.status(status).send("Could not load game from Google Drive.");
+        if (cache) {
+            try {
+                await cache.put(
+                    cacheKey,
+                    new Response(JSON.stringify(data), {
+                        headers: { "Content-Type": "application/json" }
+                    })
+                );
+            } catch (error) {
+                console.warn("HUDGAMES: could not save catalogue cache:", error);
+            }
         }
 
-        res.setHeader(
-            "Content-Type",
-            upstream.headers.get("content-type") || "text/html; charset=utf-8"
+        console.log(
+            "HUDGAMES: refreshed catalogue (" + S.games.length + " games)"
+        );
+    } catch (error) {
+        if (!showedCachedGames) throw error;
+
+        console.warn(
+            "HUDGAMES: server refresh failed; keeping saved catalogue:",
+            error
+        );
+    }
+}
+
+'''
+    source = source.replace(
+        "async function init(){",
+        helper + "async function init(){",
+        1
+    )
+    source = source.replace(
+        old_init_load,
+        "await loadGamesCached();",
+        1
+    )
+    return source, True
+
+def patch_server(source):
+    if SERVER_MARKER in source:
+        print("server.js already has the fast games API.")
+        return source, False
+
+    start_marker = 'app.get("/api/games", async (req, res, next) => {'
+    end_marker = 'app.get("/api/games/:id", async (req, res, next) => {'
+
+    start = source.find(start_marker)
+    end = source.find(end_marker, start + len(start_marker)) if start >= 0 else -1
+
+    if start < 0 or end < 0:
+        raise RuntimeError(
+            'Could not locate the /api/games route in server.js. '
+            'Nothing was changed. Check that this is the server.js you supplied.'
+        )
+
+    replacement = r'''
+// HUDGAMES_FAST_GAMES_API_V1
+app.get("/api/games", async (req, res, next) => {
+    try {
+        const q = String(req.query.q || "").toLowerCase();
+
+        const found = games.filter(g =>
+            String(g.name || g.title || "").toLowerCase().includes(q)
         );
 
-        res.setHeader("Cache-Control", "no-store");
-        res.setHeader("X-Content-Type-Options", "nosniff");
+        // Fetch metadata and this user's favourites in two queries total.
+        // The old implementation made up to two database queries per game.
+        const metadataRows = await all("SELECT * FROM game_meta");
+        const metadata = new Map(
+            metadataRows.map(row => [String(row.game_id), row])
+        );
 
-        if (!upstream.body) {
-            return res.status(502).send("Google Drive returned an empty response.");
-        }
+        const favouriteIds = req.user
+            ? new Set(
+                (await all(
+                    "SELECT game_id FROM favorites WHERE user_id=?",
+                    [req.user.id]
+                )).map(row => String(row.game_id))
+            )
+            : new Set();
 
-        const { Readable } = await import("node:stream");
-        Readable.fromWeb(upstream.body).pipe(res);
+        const result = found.map(g => {
+            const id = String(g.id);
+            const meta = metadata.get(id);
+
+            return {
+                id,
+                name: g.name || g.title || "Untitled",
+                title: g.title || g.name || "Untitled",
+                description: meta?.description || "",
+                cover: meta?.cover || "",
+                offline: !!meta?.offline,
+                favorite: favouriteIds.has(id)
+            };
+        });
+
+        res.setHeader("Cache-Control", "private, no-cache");
+        res.json({ games: result });
     } catch (error) {
         next(error);
     }
 });
 
-app.use((error, req, res, next) => {
-    console.error(error);
-    if (res.headersSent) return next(error);
-    res.status(500).send("Game server error.");
-});
-
-app.listen(port, "0.0.0.0", () => {
-    console.log(`HUDGAMES game server running on port ${port}`);
-});
 '''
-
-SW = r'''const VERSION = "hudgames-v2";
-
-self.addEventListener("install", event => {
-    event.waitUntil(self.skipWaiting());
-});
-
-self.addEventListener("activate", event => {
-    event.waitUntil((async () => {
-        const keys = await caches.keys();
-        await Promise.all(
-            keys.filter(key => key !== VERSION).map(key => caches.delete(key))
-        );
-        await self.clients.claim();
-    })());
-});
-'''
-
-def backup(file):
-    if file.exists():
-        destination = file.with_name(file.name + ".backup")
-        shutil.copy2(file, destination)
-        print("Backup:", destination.name)
-
-def replace_once(source, old, new, label):
-    count = source.count(old)
-    if count != 1:
-        raise RuntimeError(
-            f"Could not safely patch {label}: expected one match, found {count}."
-        )
-    return source.replace(old, new, 1)
-
-def patch_app():
-    if not APP.exists():
-        raise FileNotFoundError("public/app.js is missing.")
-
-    source = APP.read_text(encoding="utf-8")
-
-    marker = "// HUDGAMES_SEPARATE_GAME_ORIGIN"
-    start = source.find(marker)
-    end = source.find("const dbOpen=", start)
-
-    if start < 0 or end < 0:
-        raise RuntimeError("Could not find the game-launching section in app.js.")
-
-    replacement = f'''// HUDGAMES_SEPARATE_GAME_ORIGIN
-
-const GAME_ORIGIN = "{GAME_ORIGIN}";
-
-async function play(g) {{
-    if (S.user) {{
-        api("/api/activity", {{
-            method: "POST",
-            body: JSON.stringify({{ gameId: g.id }})
-        }}).catch(() => {{}});
-    }}
-
-    const tab = window.open("about:blank", "_blank");
-
-    if (!tab) {{
-        alert("Allow pop-ups for HUDGAMES to launch games.");
-        return;
-    }}
-
-    tab.opener = null;
-
-    try {{
-        const blob = await offlineGet(String(g.id));
-
-        if (blob) {{
-            tab.location.href = URL.createObjectURL(blob);
-            return;
-        }}
-
-        const url = new URL(
-            "/play/" + encodeURIComponent(g.id),
-            GAME_ORIGIN
-        );
-
-        tab.location.href = url.href;
-    }} catch (error) {{
-        tab.close();
-        alert("Could not launch game: " + error.message);
-    }}
-}}
-
-'''
-
     source = source[:start] + replacement + source[end:]
-
-    old_request = '''async function requestAction(id,a){await api(`/api/requests/${id}/${a}`,{method:"POST",body:"{}"});loadFriends()}'''
-
-    new_request = '''async function requestAction(id,a){
-    const action = a === "decline" ? "reject" : a;
-    await api(`/api/requests/${encodeURIComponent(id)}/${action}`, {
-        method: "POST",
-        body: "{}"
-    });
-    await loadFriends();
-}'''
-
-    source = replace_once(
-        source,
-        old_request,
-        new_request,
-        "friend request actions"
-    )
-
-    backup(APP)
-    APP.write_text(source, encoding="utf-8")
-    print("Updated public/app.js")
-
-def update_package():
-    if not PACKAGE.exists():
-        raise FileNotFoundError("package.json is missing.")
-
-    data = json.loads(PACKAGE.read_text(encoding="utf-8"))
-
-    scripts = data.setdefault("scripts", {})
-    scripts["start"] = scripts.get("start", "node server.js")
-    scripts["start:games"] = "node game-server.js"
-
-    dependencies = data.setdefault("dependencies", {})
-    dependencies.setdefault("@libsql/client", "^0.15.15")
-
-    backup(PACKAGE)
-    PACKAGE.write_text(
-        json.dumps(data, indent=2) + "\n",
-        encoding="utf-8"
-    )
-
-    print("Updated package.json")
-
-def write_game_server():
-    target = ROOT / "game-server.js"
-    backup(target)
-    target.write_text(GAME_SERVER, encoding="utf-8")
-    print("Created game-server.js")
-
-def write_service_worker():
-    target = PUBLIC / "sw.js"
-    backup(target)
-    target.write_text(SW, encoding="utf-8")
-    print("Updated public/sw.js")
+    return source, True
 
 def main():
-    if not SERVER.exists():
-        raise FileNotFoundError("server.js is missing.")
+    app_original = read_file(APP_FILE)
+    server_original = read_file(SERVER_FILE)
 
-    if not GAMES.exists():
-        raise FileNotFoundError("data/games.json is missing.")
+    # Prepare both edits before writing either file, so a mismatch is safe.
+    app_updated, app_changed = patch_app(app_original)
+    server_updated, server_changed = patch_server(server_original)
 
-    print("Checking game catalogue...")
+    if not app_changed and not server_changed:
+        print("\nNothing to do. Both fixes are already installed.")
+        return
 
-    catalogue = json.loads(GAMES.read_text(encoding="utf-8"))
+    if app_changed:
+        backup(APP_FILE, app_original)
+    if server_changed:
+        backup(SERVER_FILE, server_original)
 
-    if not isinstance(catalogue, list):
-        raise RuntimeError("data/games.json must contain a JSON array.")
+    APP_FILE.write_text(app_updated, encoding="utf-8", newline="")
+    SERVER_FILE.write_text(server_updated, encoding="utf-8", newline="")
 
-    print(f"Found {len(catalogue)} games.")
-
-    print("\nUpdating HUDGAMES...")
-
-    patch_app()
-    update_package()
-    write_game_server()
-    write_service_worker()
-
-    print("\nFix completed.")
-    print("\nNext steps:")
-    print("1. Run: npm install")
-    print("2. Test the main server locally.")
-    print("3. Deploy the main service on Render.")
-    print("4. Create a SECOND Render Web Service using this repository.")
-    print("5. Set its start command to: npm run start:games")
-    print("6. Set GOOGLE_API_KEY on the game service.")
-    print("7. Change GAME_ORIGIN in public/app.js if the game service URL differs.")
-    print("8. Commit and push the changes.")
+    print("\nHUDGAMES fixes installed successfully.")
+    print("- Returning visitors display their saved games list immediately.")
+    print("- The latest games list refreshes in the background.")
+    print("- The games API now uses bulk database queries instead of thousands.")
+    print("\nNext: test locally, then commit and push the changed files.")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        print("\nFIX FAILED:", error)
+        print("No project files were changed.")
+        sys.exit(1)
